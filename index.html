@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#15121a">
+<title>Story Director</title>
+<style>
+:root{--bg:#15121a;--panel:#211c28;--panel2:#2b2534;--text:#ece6f2;--muted:#9d93ab;--accent:#c9577a;--accent2:#e98aa6;--line:#3a3245}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 -apple-system,system-ui,sans-serif}
+header{position:sticky;top:0;z-index:5;background:var(--bg);padding:calc(env(safe-area-inset-top) + 10px) 16px 10px;border-bottom:1px solid var(--line)}
+header h1{font-size:18px;margin:0}
+main{padding:14px 14px calc(90px + env(safe-area-inset-bottom))}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:var(--panel);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom);z-index:5}
+nav button{flex:1;background:none;border:0;color:var(--muted);padding:13px 0;font-size:13px}
+nav button.on{color:var(--accent2);font-weight:700}
+.tab{display:none}.tab.on{display:block}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:12px}
+label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
+input,textarea,select{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px;font:16px/1.4 -apple-system,system-ui,sans-serif}
+textarea{min-height:80px;resize:vertical}
+.btn{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:15px}
+.btn:disabled{opacity:.45}
+.pri{background:var(--accent);border-color:var(--accent);color:#fff}
+.danger{color:#ff8f8f}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.row>.btn{flex:1}
+.muted{color:var(--muted);font-size:13px}
+.passage{font-family:Georgia,serif;font-size:17px;line-height:1.65;white-space:pre-wrap;padding:12px 0;border-bottom:1px dashed var(--line)}
+.dir{font-family:-apple-system,system-ui,sans-serif;font-size:12px;color:var(--accent2);margin-bottom:4px}
+.chip{display:inline-block;padding:6px 11px;border-radius:16px;background:var(--panel2);border:1px solid var(--line);margin:6px 6px 0 0;font-size:14px}
+.chip.on{background:var(--accent);border-color:var(--accent)}
+details>summary{color:var(--accent2);font-weight:600}
+#modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:10;overflow:auto;padding:calc(env(safe-area-inset-top) + 16px) 10px 40px}
+.sheet{background:var(--panel);border-radius:14px;padding:14px;max-width:700px;margin:0 auto}
+.sheet h2{margin:0 0 4px;font-size:18px}
+</style>
+</head>
+<body>
+<header><h1>Story Director</h1><div class="muted" id="hdr"></div></header>
+<main>
+  <section class="tab" id="tab-studio"></section>
+  <section class="tab" id="tab-scenes"></section>
+  <section class="tab" id="tab-chars"></section>
+  <section class="tab" id="tab-export"></section>
+  <section class="tab" id="tab-settings"></section>
+</main>
+<nav>
+  <button data-t="studio" onclick="show('studio')">✍️ Write</button>
+  <button data-t="scenes" onclick="show('scenes')">🎬 Scenes</button>
+  <button data-t="chars" onclick="show('chars')">👥 Cast</button>
+  <button data-t="export" onclick="show('export')">📄 Export</button>
+  <button data-t="settings" onclick="show('settings')">⚙️</button>
+</nav>
+<div id="modal"></div>
+<script>
+/* ---------- basics ---------- */
+const $=s=>document.querySelector(s);
+const uid=()=>Math.random().toString(36).slice(2,10);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const wc=t=>(String(t).match(/\S+/g)||[]).length;
+const sceneWords=s=>wc(s.passages.map(p=>p.text).join(' '));
+const KEY='storyDirector.v1';
+function defaults(){return{
+  settings:{apiKey:'',model:'venice-uncensored',temperature:0.85,words:350,recent:6,autoState:true,
+    style:'Vivid, sensory prose with natural dialogue. Vary sentence rhythm. Show emotion through action and body language rather than stating it.'},
+  characters:[],scenes:[],currentScene:null,models:[],
+  book:{title:'',author:'',order:[],include:{}}}}
+function normalize(d){const def=defaults();d.settings=Object.assign(def.settings,d.settings||{});d.book=Object.assign(def.book,d.book||{});return Object.assign(def,d)}
+let db=(()=>{try{const d=JSON.parse(localStorage.getItem(KEY));if(d)return normalize(d)}catch(e){}return defaults()})();
+function save(){try{localStorage.setItem(KEY,JSON.stringify(db))}catch(e){alert('Could not save — storage may be full. Download a backup in Settings.')}}
+const curScene=()=>db.scenes.find(s=>s.id===db.currentScene);
+const castOf=s=>s.charIds.map(id=>db.characters.find(c=>c.id===id)).filter(Boolean);
+const status=m=>{const e=$('#status');if(e)e.textContent=m};
+const scrollBottom=()=>window.scrollTo(0,document.body.scrollHeight);
+
+/* ---------- navigation & modal ---------- */
+const render={studio:()=>renderStudio(),scenes:renderScenes,chars:renderChars,export:renderExport,settings:renderSettings};
+function show(t){
+  document.querySelectorAll('.tab').forEach(e=>e.classList.toggle('on',e.id==='tab-'+t));
+  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.t===t));
+  const s=curScene();$('#hdr').textContent=s?'Scene: '+s.title:'';
+  render[t]();t==='studio'?scrollBottom():window.scrollTo(0,0);
+}
+function modal(title,html,onSave){
+  const m=$('#modal');
+  m.innerHTML=`<div class="sheet"><h2>${esc(title)}</h2>${html}<div class="row" style="margin-top:14px"><button class="btn" id="mCancel">Cancel</button><button class="btn pri" id="mSave">Save</button></div></div>`;
+  m.style.display='block';m.scrollTop=0;
+  $('#mCancel').onclick=closeModal;
+  $('#mSave').onclick=()=>{if(onSave()!==false)closeModal()};
+}
+function closeModal(){$('#modal').style.display='none';$('#modal').innerHTML=''}
+function fieldsHTML(defs,obj,p){return defs.map(([k,l,t])=>`<label>${esc(l)}</label>`+(t==='textarea'
+  ?`<textarea id="${p}${k}">${esc(obj[k])}</textarea>`
+  :`<input id="${p}${k}" type="${t==='number'?'number':'text'}" value="${esc(obj[k])}">`)).join('')}
+function readFields(defs,p){const o={};defs.forEach(([k])=>o[k]=$('#'+p+k).value.trim());return o}
+
+/* ---------- characters ---------- */
+const CF=[['name','Name','input'],['age','Age (18+)','number'],['pronouns','Gender / pronouns','input'],
+ ['appearance','Appearance (height, build, hair, eyes, distinguishing features)','textarea'],
+ ['personality','Personality','textarea'],['voice','Voice & speech style','textarea'],
+ ['backstory','Backstory','textarea'],['desires','Desires & dynamics','textarea'],
+ ['limits','Limits (things they won\'t do)','textarea'],['notes','Other notes','textarea']];
+function renderChars(){
+  $('#tab-chars').innerHTML=`<button class="btn pri" style="width:100%;margin-bottom:12px" onclick="editCharacter()">+ New character</button>`+
+  (db.characters.map(c=>`<div class="card"><div style="font-weight:700">${esc(c.name)} <span class="muted">· ${esc(c.age)}${c.pronouns?' · '+esc(c.pronouns):''}</span></div>
+   <div class="muted">${esc((c.appearance||'').slice(0,120))}</div>
+   <div class="row" style="margin-top:8px"><button class="btn" onclick="editCharacter('${c.id}')">Edit</button><button class="btn" onclick="dupChar('${c.id}')">Duplicate</button><button class="btn danger" onclick="delChar('${c.id}')">Delete</button></div></div>`).join('')
+  ||'<p class="muted">No characters yet. Build your cast here, then pick them for each scene.</p>');
+}
+function editCharacter(id){
+  const c=db.characters.find(x=>x.id===id)||{};
+  modal(id?'Edit character':'New character',fieldsHTML(CF,c,'c_'),()=>{
+    const v=readFields(CF,'c_');
+    if(!v.name){alert('Give them a name.');return false}
+    const age=parseInt(v.age,10);
+    if(!(age>=18)){alert('Characters must be adults (18 or older).');return false}
+    v.age=String(age);
+    if(id)Object.assign(c,v);else db.characters.push({id:uid(),...v});
+    save();renderChars();
+  });
+}
+function dupChar(id){const c=db.characters.find(x=>x.id===id);db.characters.push({...c,id:uid(),name:c.name+' (copy)'});save();renderChars()}
+function delChar(id){
+  const used=db.scenes.filter(s=>s.charIds.includes(id)).length;
+  if(!confirm(used?`This character is in ${used} scene(s). Delete anyway?`:'Delete this character?'))return;
+  db.characters=db.characters.filter(c=>c.id!==id);save();renderChars();
+}
+
+/* ---------- scenes ---------- */
+const SF=[['title','Scene title','input'],['setting','Setting (place, time, atmosphere)','textarea'],
+ ['premise','Premise / how the scene starts','textarea'],['tone','Tone & heat level','input'],
+ ['pov','Point of view & tense','input'],['facts','Locked facts (never contradicted)','textarea'],
+ ['state','Scene state (where everyone is, positions, clothing)','textarea']];
+function renderScenes(){
+  $('#tab-scenes').innerHTML=`<button class="btn pri" style="width:100%;margin-bottom:12px" onclick="editScene()">+ New scene</button>`+
+  (db.scenes.map(s=>`<div class="card"><div style="font-weight:700">${esc(s.title)} ${s.done?'<span class="muted">✓ complete</span>':''}</div>
+   <div class="muted">${castOf(s).map(c=>esc(c.name)).join(', ')||'No cast'} · ${s.passages.length} passages · ${sceneWords(s)} words</div>
+   <div class="row" style="margin-top:8px"><button class="btn pri" onclick="openScene('${s.id}')">Open</button><button class="btn" onclick="editScene('${s.id}')">Setup</button><button class="btn" onclick="dupScene('${s.id}')">Reuse setup</button><button class="btn danger" onclick="delScene('${s.id}')">Delete</button></div></div>`).join('')
+  ||'<p class="muted">No scenes yet.</p>');
+}
+function editScene(id){
+  if(!db.characters.length){alert('Create at least one character first.');return show('chars')}
+  const s=db.scenes.find(x=>x.id===id)||{charIds:[],pov:'Third person, past tense'};
+  let sel=[...s.charIds];
+  modal(id?'Scene setup':'New scene',`<label>Cast (tap to select)</label><div id="castPick">${db.characters.map(c=>`<span class="chip ${sel.includes(c.id)?'on':''}" data-cid="${c.id}">${esc(c.name)}</span>`).join('')}</div>`+fieldsHTML(SF,s,'s_'),()=>{
+    const v=readFields(SF,'s_');
+    if(!v.title){alert('Give the scene a title.');return false}
+    if(!sel.length){alert('Pick at least one character.');return false}
+    if(id){Object.assign(s,v,{charIds:sel});save();renderScenes()}
+    else{const n={id:uid(),...v,charIds:sel,passages:[],summary:'',sumUpTo:0,done:false,created:Date.now()};
+      db.scenes.unshift(n);db.currentScene=n.id;save();show('studio')}
+  });
+  $('#castPick').onclick=e=>{const cid=e.target.dataset.cid;if(!cid)return;
+    sel=sel.includes(cid)?sel.filter(x=>x!==cid):[...sel,cid];e.target.classList.toggle('on')};
+}
+function openScene(id){db.currentScene=id;save();show('studio')}
+function dupScene(id){const s=db.scenes.find(x=>x.id===id);
+  db.scenes.unshift({...JSON.parse(JSON.stringify(s)),id:uid(),title:s.title+' (new)',passages:[],summary:'',sumUpTo:0,done:false,created:Date.now()});
+  save();renderScenes()}
+function delScene(id){if(!confirm('Delete this scene and all its text?'))return;
+  db.scenes=db.scenes.filter(s=>s.id!==id);if(db.currentScene===id)db.currentScene=null;save();renderScenes()}
+
+/* ---------- studio ---------- */
+let busy=false,ctrl=null;
+function renderStudio(clearInput){
+  const el=$('#tab-studio'),s=curScene();
+  const keep=clearInput?'':($('#dirInput')?.value||'');
+  if(!s){el.innerHTML=`<div class="card"><p>No scene open.</p><button class="btn pri" onclick="show('scenes')">Go to Scenes</button></div>`;return}
+  el.innerHTML=`
+  <div class="card"><div style="font-weight:700;font-size:18px">${esc(s.title)} ${s.done?'<span class="muted">✓ complete</span>':''}</div>
+   <div>${castOf(s).map(c=>`<span class="chip">${esc(c.name)}</span>`).join('')}</div>
+   <div class="muted" style="margin-top:6px">${s.passages.length} passages · ${sceneWords(s)} words</div></div>
+  <details class="card" ${s.state?'':'open'}><summary>Scene state — who's where, wearing what</summary>
+   <p class="muted">Sent with every request as ground truth. ${db.settings.autoState?'Auto-updates after each passage; fix anything that\'s wrong.':'Auto-update is off (Settings).'}</p>
+   <textarea id="stateBox" rows="7" onchange="curScene().state=this.value;save()" placeholder="Location: …&#10;Name: where — … | position — … | wearing — …">${esc(s.state)}</textarea></details>
+  <details class="card"><summary>Locked facts</summary>
+   <textarea rows="5" onchange="curScene().facts=this.value;save()">${esc(s.facts)}</textarea></details>
+  ${s.summary?`<details class="card"><summary>Story so far (condensed)</summary><p class="muted">Older passages are sent as this summary to keep things fast. Edit if something's off.</p><textarea rows="7" onchange="curScene().summary=this.value;save()">${esc(s.summary)}</textarea></details>`:''}
+  <div class="card">${s.passages.map((p,i)=>`<div class="passage" onclick="passageMenu(${i})">${p.direction?`<div class="dir">▸ ${esc(p.direction)}</div>`:''}${esc(p.text)}</div>`).join('')
+    ||'<p class="muted">Nothing written yet. Give your first direction below.</p>'}<div class="passage" id="live" style="display:none"></div></div>
+  <div class="card"><textarea id="dirInput" rows="3" placeholder="Direct the next beat… (leave blank to continue)"></textarea>
+   <div class="row" style="margin-top:8px"><button class="btn pri" id="goBtn" onclick="generate()">Write ▶</button><button class="btn" id="redoBtn" onclick="redo()">↻ Redo last</button><button class="btn" id="stopBtn" onclick="if(ctrl)ctrl.abort()" style="display:none">■ Stop</button></div>
+   <div class="row" style="margin-top:8px"><button class="btn" onclick="toggleDone()">${s.done?'Reopen scene':'Mark complete'}</button><button class="btn" onclick="exportScene('${s.id}')">Export .docx</button></div>
+   <div class="muted" id="status" style="margin-top:6px"></div><p class="muted">Tip: tap any passage to edit it or rewind to that point.</p></div>`;
+  $('#dirInput').value=keep;setBusy(busy);
+}
+function setBusy(b){busy=b;const g=$('#goBtn'),r=$('#redoBtn'),x=$('#stopBtn');
+  if(g)g.disabled=b;if(r)r.disabled=b||!curScene()?.passages.length;if(x)x.style.display=b&&ctrl?'':'none'}
+function toggleDone(){const s=curScene();s.done=!s.done;if(s.done&&db.book.include[s.id]===undefined)db.book.include[s.id]=true;save();renderStudio()}
+function passageMenu(i){
+  if(busy)return;const s=curScene(),p=s.passages[i];
+  modal('Passage '+(i+1),`<label>Direction used</label><input id="pDir" value="${esc(p.direction)}">
+   <label>Text</label><textarea id="pText" style="min-height:45vh">${esc(p.text)}</textarea>
+   <button class="btn danger" style="width:100%;margin-top:10px" onclick="if(confirm('Delete this passage and everything after it? Scene state rolls back too.')){closeModal();rewindTo(${i})}">Rewind: delete from here on</button>`,
+  ()=>{p.direction=$('#pDir').value.trim();p.text=$('#pText').value.trim();save();renderStudio()});
+}
+function rewindTo(i){const s=curScene(),p=s.passages[i];
+  s.state=p.stateBefore;s.summary=p.summaryBefore;s.sumUpTo=p.sumUpToBefore;s.passages=s.passages.slice(0,i);save();renderStudio()}
+function redo(){const s=curScene();if(!s||busy||!s.passages.length)return;
+  const i=s.passages.length-1,dir=$('#dirInput').value.trim()||s.passages[i].direction;rewindTo(i);generate(dir)}
+
+/* ---------- prompts ---------- */
+function sheet(c){return[`### ${c.name}, age ${c.age}${c.pronouns?', '+c.pronouns:''}`,
+  c.appearance&&'Appearance: '+c.appearance,c.personality&&'Personality: '+c.personality,c.voice&&'Voice/speech: '+c.voice,
+  c.backstory&&'Backstory: '+c.backstory,c.desires&&'Desires & dynamics: '+c.desires,
+  c.limits&&'Limits (never write them doing this): '+c.limits,c.notes&&'Notes: '+c.notes].filter(Boolean).join('\n')}
+function buildMessages(s,direction){
+  const st=db.settings;
+  const sys=[
+`You are the prose writer for an adult fiction anthology. A human director guides each scene; you write the next passage according to their direction. All characters are consenting adults aged 18 or older.`,
+`RULES:
+- Follow the director's direction for this beat. Don't jump ahead or end the scene unless told to.
+- Keep every physical detail consistent with the character sheets, locked facts and CURRENT SCENE STATE: names, appearance, clothing, and exactly where each person is and how they are positioned. A character only moves or changes clothing if the passage shows it happening.
+- Match the heat level set by the scene's tone and the director.
+- Write story prose only: no headings, notes, summaries, questions to the director, or image descriptions.
+- Aim for about ${st.words} words.`,
+`STYLE: ${st.style}`,
+`CHARACTERS:\n${castOf(s).map(sheet).join('\n\n')}`,
+`SCENE: ${s.title}\nSetting: ${s.setting||'-'}\nPremise: ${s.premise||'-'}\nTone: ${s.tone||'-'}\nPOV/tense: ${s.pov||'-'}`,
+s.facts&&`LOCKED FACTS (never contradict):\n${s.facts}`,
+s.summary&&`STORY SO FAR (earlier passages, condensed):\n${s.summary}`,
+`CURRENT SCENE STATE (ground truth for location, positions, clothing):\n${s.state||'(not yet established; establish it clearly)'}`
+  ].filter(Boolean).join('\n\n');
+  const msgs=[{role:'system',content:sys}];
+  s.passages.slice(s.sumUpTo||0).forEach(p=>msgs.push({role:'user',content:'DIRECTION: '+(p.direction||'Continue.')},{role:'assistant',content:p.text}));
+  msgs.push({role:'user',content:`DIRECTION: ${direction||'Continue the scene naturally from where it left off.'}\n\n(Check the current scene state, then write the next passage.)`});
+  return msgs;
+}
+async function updateState(s,text){
+  const out=await callVenice([
+    {role:'system',content:'You are a continuity tracker for a fiction manuscript. You read a passage and update a factual scene-state sheet. Output only the updated sheet.'},
+    {role:'user',content:`CHARACTERS: ${castOf(s).map(c=>c.name).join(', ')}
+
+PREVIOUS SCENE STATE:
+${s.state||'(none)'}
+
+NEW PASSAGE:
+${text}
+
+Write the scene state as of the END of this passage, in exactly this format:
+Location: <place, notable objects, lighting>
+<Name>: where — <exact spot> | position — <posture, what they're touching or holding> | wearing — <current clothing, or what's been removed> | mood — <1-2 words>
+
+One line per character. Only change what the passage actually changed. Be concrete and brief.`}],{temperature:0.2,max_tokens:500});
+  return clean(out)||s.state;
+}
+async function maybeSummarize(s){
+  const st=db.settings,up=s.sumUpTo||0,n=s.passages.length;
+  if(n-up<=st.recent+2)return;
+  const end=n-st.recent;status('Condensing earlier passages…');
+  try{
+    s.summary=clean(await callVenice([
+      {role:'system',content:'You condense fiction passages into a running summary for a writer who must continue the story consistently. Output only the summary.'},
+      {role:'user',content:`EXISTING SUMMARY:\n${s.summary||'(none)'}\n\nPASSAGES TO ADD:\n${s.passages.slice(up,end).map(p=>p.text).join('\n\n')}\n\nRewrite the summary to include these passages. Under 300 words, chronological and factual: key actions, dialogue that matters, changes in clothing, positions or location, and any details that must stay consistent later.`}],
+      {temperature:0.3,max_tokens:700}));
+    s.sumUpTo=end;save();
+  }catch(e){status('Condensing failed (will retry next turn): '+e.message)}
+}
+
+/* ---------- Venice API ---------- */
+const clean=t=>String(t||'').replace(/<think>[\s\S]*?(<\/think>|$)/g,'').replace(/^\s*DIRECTION:.*$/gm,'').trim();
+async function callVenice(messages,{stream=false,signal,onToken,temperature,max_tokens=900}={}){
+  const st=db.settings;
+  const res=await fetch('https://api.venice.ai/api/v1/chat/completions',{method:'POST',signal,
+    headers:{'Authorization':'Bearer '+st.apiKey,'Content-Type':'application/json'},
+    body:JSON.stringify({model:st.model,messages,temperature:temperature??st.temperature,max_tokens,stream,
+      venice_parameters:{include_venice_system_prompt:false}})});
+  if(!res.ok){let t='';try{t=await res.text()}catch(e){}throw new Error(`Venice error ${res.status}: ${t.slice(0,300)}`)}
+  if(!stream){const j=await res.json();return j.choices?.[0]?.message?.content||''}
+  const reader=res.body.getReader(),dec=new TextDecoder();let buf='',raw='',out='';
+  while(true){
+    const{done,value}=await reader.read();if(done)break;
+    const chunk=dec.decode(value,{stream:true});raw+=chunk;buf+=chunk;
+    const lines=buf.split('\n');buf=lines.pop();
+    for(const line of lines){const l=line.trim();if(!l.startsWith('data:'))continue;
+      const d=l.slice(5).trim();if(d==='[DONE]')continue;
+      try{const t=JSON.parse(d).choices?.[0]?.delta?.content;if(t){out+=t;onToken&&onToken(out)}}catch(e){}}
+  }
+  if(!out){try{out=JSON.parse(raw).choices[0].message.content||''}catch(e){}}
+  return out;
+}
+async function generate(override){
+  if(busy)return;const s=curScene();if(!s)return;const st=db.settings;
+  if(!st.apiKey){alert('Add your Venice API key in Settings first.');return show('settings')}
+  const direction=(override!=null?override:$('#dirInput').value).trim();
+  ctrl=new AbortController();setBusy(true);status('Writing…');
+  const live=$('#live');live.style.display='block';live.textContent='…';scrollBottom();
+  let partial='';
+  const addPassage=text=>{s.passages.push({id:uid(),direction,text,stateBefore:s.state||'',summaryBefore:s.summary||'',sumUpToBefore:s.sumUpTo||0});
+    save();renderStudio(true);setBusy(true);scrollBottom()};
+  try{
+    const raw=await callVenice(buildMessages(s,direction),{stream:true,signal:ctrl.signal,max_tokens:Math.round(st.words*2.2)+200,
+      onToken:t=>{partial=clean(t);live.textContent=partial;if(innerHeight+scrollY>=document.body.scrollHeight-200)scrollBottom()}});
+    ctrl=null;const text=clean(raw);
+    if(!text)throw new Error('Empty reply. Try again, or pick a different model in Settings.');
+    addPassage(text);
+    if(st.autoState){status('Updating scene state…');
+      try{s.state=await updateState(s,text);save();const b=$('#stateBox');if(b)b.value=s.state}
+      catch(e){status('Scene-state update failed: '+e.message)}}
+    await maybeSummarize(s);status('');
+  }catch(e){
+    const aborted=e.name==='AbortError';ctrl=null;
+    if(aborted&&partial){addPassage(partial);status('Stopped. Partial passage kept; tap it to edit, or Redo.')}
+    else{live.style.display='none';status(aborted?'Stopped.':'⚠ '+e.message)}
+  }finally{ctrl=null;setBusy(false)}
+}
+async function testKey(){
+  if(!db.settings.apiKey)return alert('Paste your API key first.');
+  try{await callVenice([{role:'user',content:'Reply with the word OK.'}],{max_tokens:10});alert('Connected ✔')}
+  catch(e){alert('Connection failed: '+e.message)}
+}
+async function loadModels(){
+  try{const r=await fetch('https://api.venice.ai/api/v1/models?type=text',{headers:{Authorization:'Bearer '+db.settings.apiKey}});
+    const j=await r.json();db.models=(j.data||[]).map(m=>m.id);save();renderSettings();
+    alert(`Loaded ${db.models.length} models. Tap the Model box to pick one.`)}
+  catch(e){alert('Could not load models: '+e.message)}
+}
+
+/* ---------- export (.docx built in-browser, no libraries) ---------- */
+const CRC=(()=>{const t=[];for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t[n]=c>>>0}return t})();
+function crc32(b){let c=0xFFFFFFFF;for(let i=0;i<b.length;i++)c=CRC[(c^b[i])&0xFF]^(c>>>8);return(c^0xFFFFFFFF)>>>0}
+function makeZip(files){
+  const enc=new TextEncoder(),parts=[],central=[];let offset=0;
+  for(const f of files){
+    const name=enc.encode(f.name),data=enc.encode(f.data),crc=crc32(data);
+    const lh=new DataView(new ArrayBuffer(30));
+    lh.setUint32(0,0x04034b50,true);lh.setUint16(4,20,true);lh.setUint16(12,33,true);
+    lh.setUint32(14,crc,true);lh.setUint32(18,data.length,true);lh.setUint32(22,data.length,true);lh.setUint16(26,name.length,true);
+    parts.push(new Uint8Array(lh.buffer),name,data);
+    const ch=new DataView(new ArrayBuffer(46));
+    ch.setUint32(0,0x02014b50,true);ch.setUint16(4,20,true);ch.setUint16(6,20,true);ch.setUint16(14,33,true);
+    ch.setUint32(16,crc,true);ch.setUint32(20,data.length,true);ch.setUint32(24,data.length,true);ch.setUint16(28,name.length,true);ch.setUint32(42,offset,true);
+    central.push(new Uint8Array(ch.buffer),name);
+    offset+=30+name.length+data.length;
+  }
+  const cdSize=central.reduce((a,b)=>a+b.length,0),end=new DataView(new ArrayBuffer(22));
+  end.setUint32(0,0x06054b50,true);end.setUint16(8,files.length,true);end.setUint16(10,files.length,true);
+  end.setUint32(12,cdSize,true);end.setUint32(16,offset,true);
+  return new Blob([...parts,...central,new Uint8Array(end.buffer)],{type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'});
+}
+const W='http://schemas.openxmlformats.org/wordprocessingml/2006/main',XH='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+const xmlEsc=s=>s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g,'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+function runs(text){return text.split(/(\*\*[^*]+\*\*|\*[^*\n]+\*)/).filter(Boolean).map(seg=>{
+  let rpr='',t=seg;
+  if(/^\*\*[^*]+\*\*$/.test(seg)){rpr='<w:rPr><w:b/></w:rPr>';t=seg.slice(2,-2)}
+  else if(/^\*[^*]+\*$/.test(seg)){rpr='<w:rPr><w:i/></w:rPr>';t=seg.slice(1,-1)}
+  return `<w:r>${rpr}<w:t xml:space="preserve">${xmlEsc(t)}</w:t></w:r>`}).join('')}
+function para(text,style,pageBreak){
+  const ppr=(style||pageBreak)?`<w:pPr>${style?`<w:pStyle w:val="${style}"/>`:''}${pageBreak?'<w:pageBreakBefore/>':''}</w:pPr>`:'';
+  return `<w:p>${ppr}${runs(text)}</w:p>`}
+function bodyParas(s){return s.passages.map(p=>p.text).join('\n\n').split(/\n+/).map(l=>l.trim()).filter(Boolean)
+  .map(l=>/^(\*\s*){3}$|^-{3,}$|^#+\s*$/.test(l)?para('* * *','SceneBreak'):para(l.replace(/^#+\s*/,''))).join('')}
+function buildDocx(body){
+  const styles=`${XH}<w:styles xmlns:w="${W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Georgia" w:eastAsia="Georgia" w:cs="Georgia"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="360" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>`+
+  `<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/><w:pPr><w:ind w:firstLine="720"/></w:pPr></w:style>`+
+  `<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:spacing w:before="3600" w:after="240"/><w:ind w:firstLine="0"/><w:jc w:val="center"/></w:pPr><w:rPr><w:sz w:val="56"/><w:szCs w:val="56"/></w:rPr></w:style>`+
+  `<w:style w:type="paragraph" w:styleId="Subtitle"><w:name w:val="Subtitle"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:ind w:firstLine="0"/><w:jc w:val="center"/></w:pPr><w:rPr><w:i/><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>`+
+  `<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:before="1440" w:after="480"/><w:ind w:firstLine="0"/><w:jc w:val="center"/><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr></w:style>`+
+  `<w:style w:type="paragraph" w:styleId="SceneBreak"><w:name w:val="Scene Break"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:before="240" w:after="240"/><w:ind w:firstLine="0"/><w:jc w:val="center"/></w:pPr></w:style></w:styles>`;
+  return makeZip([
+    {name:'[Content_Types].xml',data:`${XH}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>`},
+    {name:'_rels/.rels',data:`${XH}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`},
+    {name:'word/document.xml',data:`${XH}<w:document xmlns:w="${W}"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`},
+    {name:'word/_rels/document.xml.rels',data:`${XH}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`},
+    {name:'word/styles.xml',data:styles}]);
+}
+const safeName=s=>(s||'').replace(/[^\w\- ]+/g,'').trim().slice(0,60)||'Story';
+async function deliver(blob,name){
+  const file=new File([blob],name,{type:blob.type});
+  if(navigator.canShare&&navigator.canShare({files:[file]})){
+    try{await navigator.share({files:[file],title:name});return}catch(e){if(e.name==='AbortError')return}}
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},3000);
+}
+function exportScene(id){
+  const s=db.scenes.find(x=>x.id===id);if(!s||!s.passages.length)return alert('That scene has no text yet.');
+  deliver(buildDocx(para(s.title,'Heading1')+bodyParas(s)),safeName(s.title)+'.docx');
+}
+function exportBook(){
+  const b=db.book,scenes=b.order.filter(id=>b.include[id]).map(id=>db.scenes.find(s=>s.id===id)).filter(s=>s&&s.passages.length);
+  if(!scenes.length)return alert('Tick at least one scene that has text.');
+  let x='';if(b.title){x+=para(b.title,'Title');if(b.author)x+=para(b.author,'Subtitle')}
+  scenes.forEach((s,i)=>{x+=para(s.title,'Heading1',!!b.title||i>0)+bodyParas(s)});
+  deliver(buildDocx(x),safeName(b.title||'Manuscript')+'.docx');
+}
+function renderExport(){
+  const b=db.book;b.order=b.order.filter(id=>db.scenes.some(s=>s.id===id));
+  db.scenes.forEach(s=>{if(!b.order.includes(s.id))b.order.push(s.id)});save();
+  $('#tab-export').innerHTML=`<div class="card"><b>Manuscript</b><p class="muted">Tick scenes, set the order, and export one Word file with each scene as a chapter.</p>
+   <label>Book title</label><input value="${esc(b.title)}" onchange="db.book.title=this.value;save()">
+   <label>Author / pen name</label><input value="${esc(b.author)}" onchange="db.book.author=this.value;save()"></div>
+  <div class="card">${b.order.map((id,i)=>{const s=db.scenes.find(x=>x.id===id);
+    return `<div class="row" style="padding:6px 0;border-bottom:1px solid var(--line)"><label style="flex:1;margin:0;color:var(--text);display:flex;gap:8px;align-items:center;font-size:15px"><input type="checkbox" style="width:auto" ${b.include[id]?'checked':''} onchange="db.book.include['${id}']=this.checked;save()">${esc(s.title)} <span class="muted">${sceneWords(s)}w</span></label><button class="btn" onclick="moveScene(${i},-1)">▲</button><button class="btn" onclick="moveScene(${i},1)">▼</button></div>`}).join('')||'<p class="muted">No scenes yet.</p>'}
+   <button class="btn pri" style="width:100%;margin-top:12px" onclick="exportBook()">Export manuscript (.docx)</button></div>
+  <div class="card"><b>Single scene</b><select id="oneScene" style="margin-top:8px">${db.scenes.map(s=>`<option value="${s.id}">${esc(s.title)}</option>`).join('')}</select>
+   <button class="btn" style="width:100%;margin-top:8px" onclick="exportScene($('#oneScene').value)">Export scene (.docx)</button></div>`;
+}
+function moveScene(i,d){const o=db.book.order,j=i+d;if(j<0||j>=o.length)return;[o[i],o[j]]=[o[j],o[i]];save();renderExport()}
+
+/* ---------- settings & backup ---------- */
+function renderSettings(){
+  const st=db.settings;
+  $('#tab-settings').innerHTML=`<div class="card"><b>Venice connection</b>
+   <label>API key</label><input type="password" autocomplete="off" value="${esc(st.apiKey)}" onchange="db.settings.apiKey=this.value.trim();save()">
+   <label>Model</label><input list="modelList" value="${esc(st.model)}" onchange="db.settings.model=this.value.trim();save()">
+   <datalist id="modelList">${(db.models||[]).map(m=>`<option value="${esc(m)}">`).join('')}</datalist>
+   <div class="row" style="margin-top:8px"><button class="btn" onclick="loadModels()">Load model list</button><button class="btn" onclick="testKey()">Test connection</button></div>
+   <p class="muted">Your key and stories are stored only in this browser on this device.</p></div>
+  <div class="card"><b>Writing</b>
+   <label>Words per passage: <span id="wv">${st.words}</span></label><input type="range" min="100" max="1200" step="50" value="${st.words}" oninput="$('#wv').textContent=this.value" onchange="db.settings.words=+this.value;save()">
+   <label>Creativity: <span id="tv">${st.temperature}</span></label><input type="range" min="0.3" max="1.3" step="0.05" value="${st.temperature}" oninput="$('#tv').textContent=this.value" onchange="db.settings.temperature=+this.value;save()">
+   <label>Recent passages sent word-for-word (older ones are condensed)</label><input type="number" min="2" max="20" value="${st.recent}" onchange="db.settings.recent=Math.max(2,+this.value||6);save()">
+   <label style="display:flex;gap:8px;align-items:center;color:var(--text);font-size:15px"><input type="checkbox" style="width:auto" ${st.autoState?'checked':''} onchange="db.settings.autoState=this.checked;save()">Auto-update scene state after each passage</label>
+   <label>House style (applies to every scene)</label><textarea onchange="db.settings.style=this.value;save()">${esc(st.style)}</textarea></div>
+  <div class="card"><b>Backup</b><p class="muted">Phones can clear website data. Back up regularly (your API key is left out of backups).</p>
+   <div class="row"><button class="btn" onclick="backup()">Download backup</button><button class="btn" onclick="$('#restoreFile').click()">Restore</button></div>
+   <input type="file" id="restoreFile" accept=".json,application/json" style="display:none" onchange="restore(this.files[0])"></div>`;
+}
+function backup(){const c=JSON.parse(JSON.stringify(db));c.settings.apiKey='';
+  deliver(new Blob([JSON.stringify(c)],{type:'application/json'}),`story-director-backup-${new Date().toISOString().slice(0,10)}.json`)}
+async function restore(f){if(!f)return;
+  try{const d=JSON.parse(await f.text());if(!d.characters||!d.scenes)throw new Error('Not a Story Director backup.');
+    if(!confirm('Replace everything on this device with this backup?'))return;
+    const key=db.settings.apiKey;db=normalize(d);db.settings.apiKey=key;save();alert('Restored.');show('scenes')}
+  catch(e){alert('Restore failed: '+e.message)}}
+
+/* ---------- start ---------- */
+show(db.currentScene&&curScene()?'studio':(db.characters.length?'scenes':'chars'));
+</script>
+</body>
+</html>
